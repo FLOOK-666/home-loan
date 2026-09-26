@@ -1,0 +1,4 @@
+# ไฟล์ Excel มีชื่อ-นามสกุลจริง — ห้ามขึ้น GitHub (repo ของ GitHub Pages เป็น public)
+*.xlsx
+Home Loan
+__pycache__/

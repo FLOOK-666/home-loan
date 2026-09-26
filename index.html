@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ผ่อนบ้าน</title>
+  <meta name="theme-color" content="#0f766e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="ผ่อนบ้าน">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11 12 4l9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>
+      <span id="pageTitle">ผ่อนบ้าน</span>
+    </div>
+    <div class="sync">
+      <span id="syncStatus" class="pill">—</span>
+      <button id="refreshBtn" class="icon-btn" aria-label="โหลดข้อมูลใหม่">
+        <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <nav class="tabbar">
+    <button data-tab="dash" class="active"><svg viewBox="0 0 24 24"><path d="M3 11 12 4l9 7v9H3z"/></svg><span>ภาพรวม</span></button>
+    <button data-tab="log"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>บันทึก</span></button>
+    <button data-tab="table"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg><span>ตารางงวด</span></button>
+    <button data-tab="sim"><svg viewBox="0 0 24 24"><path d="M4 19 10 13l4 4 6-8"/></svg><span>จำลองโปะ</span></button>
+    <button data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg><span>ตั้งค่า</span></button>
+  </nav>
+
+  <dialog id="modal"></dialog>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="defaults.js"></script>
+  <script src="bank-schedule.js"></script>
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
