@@ -1,7 +1,7 @@
 /* Service worker — network-first สำหรับไฟล์แอป (ได้เวอร์ชันใหม่เสมอเมื่อออนไลน์) และใช้แคชตอนออฟไลน์
  * ไม่แตะ request ไป script.google.com (ข้อมูลแคชไว้ใน localStorage แทน) */
-const CACHE = 'home-loan-v1';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'engine.js', 'defaults.js', 'bank-schedule.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-180.png'];
+const CACHE = 'home-loan-v2';
+const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'engine.js', 'slip.js', 'defaults.js', 'bank-schedule.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-180.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

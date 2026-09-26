@@ -5,7 +5,7 @@
   const E = window.LoanEngine;
   const BANK = window.BANK_SCHEDULE || {};
   const LS = { api: 'hl.api', cache: 'hl.cache', local: 'hl.local', tab: 'hl.tab' };
-  const TABS = { dash: 'ภาพรวม', log: 'บันทึกการจ่าย', table: 'ตารางงวด', sim: 'จำลองการโปะ', settings: 'ตั้งค่า' };
+  const TABS = { dash: 'ภาพรวม', log: 'บันทึกการจ่าย', table: 'ตารางงวด', sim: 'จำลองการโปะ', settings: 'ตั้งค่า', slip: 'ทดลองอ่านสลิป' };
   const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
   const COLORS = { house: 'var(--brand)', mrta: '#7c3aed', decor: 'var(--accent)' };
 
@@ -508,9 +508,133 @@
     html += `<div class="stack" style="position:sticky;bottom:calc(var(--tabbar-h) + env(safe-area-inset-bottom,0px) + 8px)">
       <button class="btn block" data-action="save-settings" ${dirty ? '' : 'disabled'}>${dirty ? 'บันทึกและคำนวณแผนใหม่' : 'ไม่มีการเปลี่ยนแปลง'}</button></div>
       <section class="card stack" style="margin-top:14px"><h2>อื่นๆ</h2>
-      <div class="row wrap"><button class="btn ghost sm" data-action="export">ส่งออกข้อมูล (JSON)</button>
+      <div class="row wrap"><button class="btn ghost sm" data-go="slip">🧪 ทดลองอ่านสลิป</button>
+      <button class="btn ghost sm" data-action="export">ส่งออกข้อมูล (JSON)</button>
       <button class="btn danger sm" data-action="reset-settings">คืนค่าเริ่มต้นจากไฟล์ Excel</button></div>
       <p class="small muted" style="margin:0">ข้อมูลหลักอยู่ใน Google Sheets อยู่แล้ว ไฟล์ JSON ใช้สำรองเพิ่ม</p></section>`;
+    return html;
+  }
+
+  // ---------------- ทดลองอ่านสลิป (OCR + QR ในเครื่อง, ไม่บันทึกข้อมูล) ----------------
+  const LIBS = {
+    tesseract: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
+    jsqr: 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
+  };
+  const loadScript = (src) => new Promise((res, rej) => {
+    if ([...document.scripts].some((s) => s.src === src)) return res();
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = () => rej(new Error('โหลดไลบรารีไม่ได้ (ต้องต่ออินเทอร์เน็ตครั้งแรก)'));
+    document.head.appendChild(s);
+  });
+  const slip = { status: 'idle', progress: 0, msg: '', preview: '', text: '', parsed: null, qr: null, ms: 0, worker: null };
+
+  function slipSetProgress(msg, p) {
+    slip.msg = msg; if (p != null) slip.progress = p;
+    const el = $('#slipProgress');
+    if (el) { el.querySelector('.msg').textContent = msg; el.querySelector('.progress > div').style.width = Math.round(slip.progress * 100) + '%'; }
+  }
+
+  async function slipRead(file) {
+    const t0 = performance.now();
+    Object.assign(slip, { status: 'working', progress: 0, text: '', parsed: null, qr: null, preview: '' });
+    rerender();
+    try {
+      slipSetProgress('กำลังเตรียมรูป…', 0.02);
+      const img = await createImageBitmap(file);
+      const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, cv.width, cv.height);
+      slip.preview = cv.toDataURL('image/jpeg', 0.7);
+      const pv = $('#slipPreview'); if (pv) { pv.src = slip.preview; pv.hidden = false; }
+
+      // QR ก่อน (เร็ว และแม่นกว่า OCR)
+      slipSetProgress('กำลังหา QR บนสลิป…', 0.05);
+      await loadScript(LIBS.jsqr);
+      const qrFrom = (c) => { const d = c.getContext('2d').getImageData(0, 0, c.width, c.height); const r = window.jsQR(d.data, d.width, d.height, { inversionAttempts: 'attemptBoth' }); return r ? r.data : null; };
+      let qrData = qrFrom(cv);
+      if (!qrData) { // ลองย่อรูป บางครั้งเจอง่ายกว่า
+        const small = document.createElement('canvas'), k = 800 / Math.max(cv.width, cv.height);
+        if (k < 1) { small.width = cv.width * k; small.height = cv.height * k; small.getContext('2d').drawImage(cv, 0, 0, small.width, small.height); qrData = qrFrom(small); }
+      }
+      slip.qr = qrData ? window.SlipReader.parseQR(qrData) : null;
+
+      // ขาวดำ ช่วยสลิปที่มีพื้นสี
+      const id = ctx.getImageData(0, 0, cv.width, cv.height), px = id.data;
+      for (let i = 0; i < px.length; i += 4) { const g = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]; px[i] = px[i + 1] = px[i + 2] = g; }
+      ctx.putImageData(id, 0, 0);
+
+      slipSetProgress('กำลังโหลดตัวอ่าน OCR (ครั้งแรกประมาณ 5–8 MB)…', 0.1);
+      await loadScript(LIBS.tesseract);
+      if (!slip.worker) {
+        slip.worker = await window.Tesseract.createWorker(['tha', 'eng'], 1, {
+          logger: (m) => {
+            if (m.status === 'recognizing text') slipSetProgress('กำลังอ่านตัวอักษร…', 0.3 + m.progress * 0.7);
+            else if (/load|initializ/.test(m.status)) slipSetProgress('กำลังโหลดข้อมูลภาษา…', 0.1 + (m.progress || 0) * 0.2);
+          },
+        });
+      }
+      const { data } = await slip.worker.recognize(cv);
+      slip.text = data.text || '';
+      slip.parsed = window.SlipReader.parseText(slip.text);
+      slip.ms = Math.round(performance.now() - t0);
+      slip.status = 'done';
+    } catch (e) {
+      slip.status = 'error'; slip.msg = e.message || String(e);
+    }
+    if (state.tab === 'slip') rerender();
+  }
+
+  /** เดาว่ายอดนี้ตรงกับค่างวดอะไร (แสดงเฉยๆ ไม่บันทึก) */
+  function slipGuess(amount) {
+    if (!(amount > 0)) return '';
+    const hits = [];
+    for (const c of state.settings.contracts) for (const s of c.segments) {
+      const range = `งวด ${s.from}${s.to ? '–' + s.to : '+'}`;
+      if (Math.abs(E.segAmount(s) - amount) < 1) hits.push(`${c.name} ${range} (ยอดเต็ม)`);
+      for (const [who, v] of Object.entries(s.shares)) if (Object.keys(s.shares).length > 1 && Math.abs(Number(v) - amount) < 1) hits.push(`${c.name} ${range} ส่วนของ${who}`);
+    }
+    return hits.length ? hits.join(' · ') : 'ไม่ตรงกับค่างวดใด (อาจเป็นการโปะ หรืออ่านยอดผิด)';
+  }
+
+  function viewSlip() {
+    const p = slip.parsed, q = slip.qr;
+    const row = (k, v, note) => `<tr><td class="muted">${k}</td><td class="right"><b>${v || '<span class="muted">ไม่พบ</span>'}</b>${note ? `<div class="small muted">${note}</div>` : ''}</td></tr>`;
+    let html = `<div class="banner">🧪 โหมดทดลอง อ่านแล้วแค่แสดงผล <b>ไม่บันทึกลงข้อมูลการผ่อน</b> และรูปไม่ออกจากเครื่อง (อ่านในมือถือทั้งหมด)</div>
+      <section class="card stack">
+        <label class="btn block" style="position:relative">📷 เลือกรูปสลิป / ถ่ายรูป
+          <input type="file" accept="image/*" data-slipfile style="position:absolute;inset:0;opacity:0;cursor:pointer"></label>
+        <p class="small muted" style="margin:0">ภาพหน้าจอสลิปจากแอปธนาคารอ่านได้แม่นกว่าการถ่ายรูปกระดาษ</p>
+        <img id="slipPreview" alt="" style="max-height:260px;object-fit:contain;border-radius:10px;background:var(--bg)" ${slip.preview ? `src="${slip.preview}"` : 'hidden'}>
+      </section>`;
+    if (slip.status === 'working') {
+      html += `<section class="card" id="slipProgress"><div class="msg small">${esc(slip.msg)}</div><div class="progress"><div style="width:${Math.round(slip.progress * 100)}%"></div></div></section>`;
+    } else if (slip.status === 'error') {
+      html += `<section class="card"><div class="pill bad">อ่านไม่สำเร็จ</div><p class="small">${esc(slip.msg)}</p></section>`;
+    } else if (slip.status === 'done') {
+      const refMatch = q && q.valid && p.ref ? (p.ref === q.transRef ? '<span class="pill ok">ตรงกับ QR ✓</span>' : '<span class="pill warn">ไม่ตรงกับ QR</span>') : '';
+      html += `<section class="card"><div class="row"><h2>ผลที่อ่านได้</h2><span class="small muted">${(slip.ms / 1000).toFixed(1)} วินาที</span></div>
+        <table class="sim-table"><tbody>
+          ${row('ยอดเงิน', p.amount != null ? money(p.amount) + ' บาท' : '', p.amountFrom === 'largest' ? 'ไม่เจอคำว่า "จำนวนเงิน" จึงเลือกตัวเลขที่มากที่สุด ควรตรวจซ้ำ' : '')}
+          ${row('ค่าธรรมเนียม', p.fee != null ? money(p.fee) : '')}
+          ${row('วันที่', p.date ? thaiDateLong(p.date) : '', p.dateText ? `อ่านได้ว่า "${esc(p.dateText)}"` : '')}
+          ${row('เวลา', p.time)}
+          ${row('ธนาคารผู้โอน', p.bank || (q && q.valid && q.bank) || '', p.bank ? 'จากข้อความบนสลิป' : q && q.valid && q.bank ? 'จาก QR (ชื่อธนาคารบนสลิปมักเป็นโลโก้ OCR อ่านไม่ได้)' : '')}
+          ${row('เลขอ้างอิง (OCR)', p.ref ? `<span style="word-break:break-all">${esc(p.ref)}</span>` : '', refMatch)}
+        </tbody></table></section>
+        <section class="card"><h2>QR บนสลิป</h2>
+        ${!q ? '<p class="small muted" style="margin:0">ไม่พบ QR (ลองครอปให้ QR ชัดขึ้น หรือใช้ภาพหน้าจอแทนรูปถ่าย)</p>'
+          : q.valid ? `<table class="sim-table"><tbody>${row('เลขอ้างอิงรายการ', `<span style="word-break:break-all">${esc(q.transRef)}</span>`)}${row('ธนาคารผู้โอน', `${esc(q.bank || 'ไม่รู้จัก')} (${esc(q.bankCode)})`)}</tbody></table>
+            <p class="small muted" style="margin:6px 0 0">QR ของสลิปมีแค่เลขอ้างอิงกับรหัสธนาคาร ไม่มียอดเงิน แต่อ่านได้แม่น 100% จึงใช้กันบันทึกสลิปซ้ำได้</p>`
+          : `<p class="small muted" style="margin:0">พบ QR แต่ไม่ใช่รูปแบบสลิปโอนเงิน</p><div class="small" style="word-break:break-all">${esc(q.raw.slice(0, 200))}</div>`}
+        </section>
+        <section class="card"><h2>ถ้าเป็นค่างวด น่าจะเป็น…</h2><p class="small" style="margin:0">${esc(slipGuess(p.amount))}</p>
+          <p class="small muted" style="margin:6px 0 0">แค่เดาจากค่างวดในหน้าตั้งค่า ไม่ได้บันทึกอะไร</p></section>
+        <section class="card"><details><summary class="small">ข้อความดิบจาก OCR (${p.lineCount} บรรทัด)</summary>
+          <pre class="small" style="white-space:pre-wrap;word-break:break-word;margin:8px 0 0">${esc(slip.text)}</pre></details></section>`;
+    }
+    html += `<button class="btn ghost block" data-go="settings">← กลับไปตั้งค่า</button>`;
     return html;
   }
 
@@ -603,10 +727,12 @@
   function render() {
     const view = $('#view');
     const y = window.scrollY;
-    const fn = { dash: viewDash, log: viewLog, table: viewTable, sim: viewSim, settings: viewSettings }[state.tab] || viewDash;
+    const fn = { dash: viewDash, log: viewLog, table: viewTable, sim: viewSim, settings: viewSettings, slip: viewSlip }[state.tab] || viewDash;
+    if (state.tab !== 'slip' && slip.preview && slip.status !== 'working') Object.assign(slip, { status: 'idle', preview: '', text: '', parsed: null, qr: null }); // ออกจากหน้าแล้วไม่เก็บรูปไว้
     view.innerHTML = fn();
     $('#pageTitle').textContent = state.tab === 'dash' ? 'ผ่อนบ้าน' : TABS[state.tab];
-    $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === state.tab));
+    const navTab = state.tab === 'slip' ? 'settings' : state.tab;
+    $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === navTab));
     window.scrollTo(0, render.keepScroll ? y : 0);
     render.keepScroll = false;
   }
@@ -714,6 +840,7 @@
   });
   $('#view').addEventListener('change', (e) => {
     const t = e.target;
+    if (t.matches('[data-slipfile]') && t.files && t.files[0]) { if (slip.status !== 'working') slipRead(t.files[0]); t.value = ''; return; }
     if (t.matches('[data-logfilter]')) { state.ui.log = t.value; rerender(); }
     // อัปเดต % ที่แสดงข้างช่องอัตรา
     if (t.dataset.path && (t.tagName === 'SELECT' || t.dataset.path === 'mlr' || t.dataset.path.startsWith('ratePeriods'))) rerender();
