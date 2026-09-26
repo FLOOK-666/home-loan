@@ -134,7 +134,16 @@ function dailyReminder() {
 
 /** รันจาก editor ได้: ส่ง LINE ทดสอบ (ใช้ขอสิทธิ์เชื่อมต่อภายนอกครั้งแรกด้วย) */
 function testLine() {
+  const t = lineToken_();
+  // แสดงแค่ความยาว ไม่แสดง token — Channel access token ยาวราว 170+ ตัว, Channel secret ยาว 32 ตัว
+  console.log('LINE_TOKEN length = ' + (t ? t.length : 0) + (t && t.length === 32 ? ' (น่าจะเป็น Channel secret ไม่ใช่ access token)' : ''));
   runReminder_(true, { line: true });
+}
+
+/** อ่าน LINE_TOKEN และตัดช่องว่าง/บรรทัดใหม่/คำว่า Bearer ที่อาจติดมาตอนคัดลอก */
+function lineToken_() {
+  const raw = PropertiesService.getScriptProperties().getProperty('LINE_TOKEN');
+  return raw ? raw.replace(/^\s*Bearer\s+/i, '').replace(/\s+/g, '') : '';
 }
 
 /**
@@ -145,7 +154,7 @@ function runReminder_(force, channels) {
   force = force === true;
   const s = readSettings_();
   if (!s) return;
-  const lineToken = PropertiesService.getScriptProperties().getProperty('LINE_TOKEN');
+  const lineToken = lineToken_();
   const useEmail = channels.email && s.emails && s.emails.length;
   const useLine = channels.line && !!lineToken;
   if (!useEmail && !useLine) {
@@ -209,6 +218,7 @@ function sendLine_(token, text) {
     muteHttpExceptions: true,
   });
   const code = res.getResponseCode();
+  if (code === 401) throw new Error('LINE ไม่รับ token (401) — ใช้ "Channel access token (long-lived)" จากแท็บ Messaging API ไม่ใช่ Channel secret และถ้ากด Reissue แล้วต้องใส่ token ตัวใหม่');
   if (code !== 200) throw new Error('LINE ส่งไม่สำเร็จ (' + code + '): ' + res.getContentText().slice(0, 200));
 }
 
