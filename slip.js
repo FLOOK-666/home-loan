@@ -36,7 +36,10 @@
     const top = tlv(payload.trim());
     const sub = top && top['00'] ? tlv(top['00']) : null;
     if (!sub || !sub['03']) return { raw: payload, valid: false };
-    return { raw: payload, valid: true, bankCode: sub['02'] || '', bank: BANKS[sub['02']] || '', transRef: sub['03'], country: top['51'] || '' };
+    // หลายธนาคารขึ้นต้นเลขอ้างอิงด้วย YYYYMMDD — ใช้เป็นตัวตรวจวันที่ (ถ้าเป็นวันที่ที่สมเหตุสมผล)
+    const d = /^(20\d{2})(\d{2})(\d{2})/.exec(sub['03']);
+    const refDate = d ? toISO(Number(d[3]), Number(d[2]), d[1]) : '';
+    return { raw: payload, valid: true, bankCode: sub['02'] || '', bank: BANKS[sub['02']] || '', transRef: sub['03'], refDate, country: top['51'] || '' };
   }
 
   // แก้ตัวอักษรที่ OCR สับสนบ่อยในบริบทตัวเลข

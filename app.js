@@ -536,12 +536,14 @@
 
   async function slipRead(file) {
     const t0 = performance.now();
-    Object.assign(slip, { status: 'working', progress: 0, text: '', parsed: null, qr: null, preview: '' });
+    Object.assign(slip, { status: 'working', progress: 0, text: '', parsed: null, qr: null, preview: '', dateCheck: null });
     rerender();
     try {
       slipSetProgress('กำลังเตรียมรูป…', 0.02);
       const img = await createImageBitmap(file);
-      const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+      // ปรับตาม "ความกว้าง" ให้ตัวอักษรใหญ่พอ (ภาพหน้าจอมือถือยาวมาก ถ้าย่อด้านยาวตัวหนังสือจะเล็กเกิน)
+      let scale = 1300 / img.width;
+      if (img.height * scale > 4000) scale = 4000 / img.height;
       const cv = document.createElement('canvas');
       cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
       const ctx = cv.getContext('2d', { willReadFrequently: true });
@@ -575,9 +577,28 @@
           },
         });
       }
-      const { data } = await slip.worker.recognize(cv);
+      const { data } = await slip.worker.recognize(cv, {}, { text: true, blocks: true });
       slip.text = data.text || '';
       slip.parsed = window.SlipReader.parseText(slip.text);
+
+      // รอบ 2: ครอปบรรทัดที่น่าจะเป็นวันที่ (มีเวลา หรือ ตัวเลข+อักษรไทย) ขยาย 2.5 เท่าแล้วอ่านใหม่
+      slipSetProgress('กำลังอ่านบรรทัดวันที่ซ้ำแบบขยาย…', 0.97);
+      const lines = data.lines || (data.blocks || []).flatMap((b) => (b.paragraphs || []).flatMap((p) => p.lines || []));
+      const cands = lines.filter((l) => /(?<!\d)([01]?\d|2[0-3])[:.][0-5]\d(?!\d)|\d{1,2}\s*[เก-ฮ]/.test(l.text) && !/[A-Z0-9]{12,}/.test(l.text)).slice(0, 3);
+      const zoomReads = [];
+      for (const l of cands) {
+        const { x0, y0, x1, y1 } = l.bbox, pad = Math.round((y1 - y0) * 0.4), Z = 2.5;
+        const sx = Math.max(0, x0 - pad), sy = Math.max(0, y0 - pad), sw = Math.min(cv.width - sx, x1 - x0 + pad * 2), sh = Math.min(cv.height - sy, y1 - y0 + pad * 2);
+        const zc = document.createElement('canvas'); zc.width = Math.round(sw * Z); zc.height = Math.round(sh * Z);
+        const zx = zc.getContext('2d'); zx.imageSmoothingQuality = 'high'; zx.drawImage(cv, sx, sy, sw, sh, 0, 0, zc.width, zc.height);
+        const r = await slip.worker.recognize(zc);
+        const t = (r.data.text || '').trim();
+        const dt = window.SlipReader.findDate(t);
+        zoomReads.push({ text: t, date: dt ? dt.iso : '' });
+      }
+      const zoomDate = zoomReads.find((z) => z.date);
+      slip.dateCheck = { first: slip.parsed.date, firstText: slip.parsed.dateText, zoom: zoomDate ? zoomDate.date : '', zoomText: zoomDate ? zoomDate.text : '', reads: zoomReads };
+      if (zoomDate) { slip.parsed.date = zoomDate.date; slip.parsed.dateText = zoomDate.text; }
       slip.ms = Math.round(performance.now() - t0);
       slip.status = 'done';
     } catch (e) {
@@ -596,6 +617,20 @@
       for (const [who, v] of Object.entries(s.shares)) if (Object.keys(s.shares).length > 1 && Math.abs(Number(v) - amount) < 1) hits.push(`${c.name} ${range} ส่วนของ${who}`);
     }
     return hits.length ? hits.join(' · ') : 'ไม่ตรงกับค่างวดใด (อาจเป็นการโปะ หรืออ่านยอดผิด)';
+  }
+
+  /** หมายเหตุใต้วันที่: ข้อความที่อ่านได้ + ตรวจเทียบรอบขยาย / QR / ความสมเหตุสมผล */
+  function slipDateNote(p, q) {
+    const notes = [];
+    const dc = slip.dateCheck || {};
+    if (p.dateText) notes.push(`อ่านได้ว่า "${esc(p.dateText)}"`);
+    if (dc.first && dc.zoom && dc.first !== dc.zoom) notes.push(`<span class="pill warn">รอบแรกอ่านได้ ${thaiDate(dc.first)} รอบขยายได้ ${thaiDate(dc.zoom)}</span>`);
+    if (q && q.valid && q.refDate && p.date) notes.push(q.refDate === p.date ? '<span class="pill ok">ตรงกับวันที่ในเลขอ้างอิง QR ✓</span>' : `<span class="pill warn">เลขอ้างอิง QR ระบุ ${thaiDate(q.refDate)}</span>`);
+    if (!p.date && q && q.valid && q.refDate) notes.push(`OCR อ่านไม่ได้ แต่เลขอ้างอิง QR ระบุ ${thaiDate(q.refDate)}`);
+    const today = todayStr();
+    if (p.date && p.date > today) notes.push('<span class="pill bad">เป็นวันในอนาคต น่าจะอ่านผิด</span>');
+    else if (p.date && E.daysBetween(p.date, today) > 730) notes.push('<span class="pill warn">เก่ากว่า 2 ปี ตรวจอีกครั้ง</span>');
+    return notes.join('<br>');
   }
 
   function viewSlip() {
@@ -618,7 +653,7 @@
         <table class="sim-table"><tbody>
           ${row('ยอดเงิน', p.amount != null ? money(p.amount) + ' บาท' : '', p.amountFrom === 'largest' ? 'ไม่เจอคำว่า "จำนวนเงิน" จึงเลือกตัวเลขที่มากที่สุด ควรตรวจซ้ำ' : '')}
           ${row('ค่าธรรมเนียม', p.fee != null ? money(p.fee) : '')}
-          ${row('วันที่', p.date ? thaiDateLong(p.date) : '', p.dateText ? `อ่านได้ว่า "${esc(p.dateText)}"` : '')}
+          ${row('วันที่', p.date ? thaiDateLong(p.date) : '', slipDateNote(p, q))}
           ${row('เวลา', p.time)}
           ${row('ธนาคารผู้โอน', p.bank || (q && q.valid && q.bank) || '', p.bank ? 'จากข้อความบนสลิป' : q && q.valid && q.bank ? 'จาก QR (ชื่อธนาคารบนสลิปมักเป็นโลโก้ OCR อ่านไม่ได้)' : '')}
           ${row('เลขอ้างอิง (OCR)', p.ref ? `<span style="word-break:break-all">${esc(p.ref)}</span>` : '', refMatch)}
@@ -632,7 +667,8 @@
         <section class="card"><h2>ถ้าเป็นค่างวด น่าจะเป็น…</h2><p class="small" style="margin:0">${esc(slipGuess(p.amount))}</p>
           <p class="small muted" style="margin:6px 0 0">แค่เดาจากค่างวดในหน้าตั้งค่า ไม่ได้บันทึกอะไร</p></section>
         <section class="card"><details><summary class="small">ข้อความดิบจาก OCR (${p.lineCount} บรรทัด)</summary>
-          <pre class="small" style="white-space:pre-wrap;word-break:break-word;margin:8px 0 0">${esc(slip.text)}</pre></details></section>`;
+          <pre class="small" style="white-space:pre-wrap;word-break:break-word;margin:8px 0 0">${esc(slip.text)}</pre>
+          ${(slip.dateCheck?.reads || []).length ? `<div class="small muted" style="margin-top:8px">อ่านบรรทัดวันที่แบบขยาย:</div><pre class="small" style="white-space:pre-wrap;margin:4px 0 0">${slip.dateCheck.reads.map((z) => esc(z.text) + (z.date ? '  → ' + thaiDate(z.date) : '')).join('\n')}</pre>` : ''}</details></section>`;
     }
     html += `<button class="btn ghost block" data-go="settings">← กลับไปตั้งค่า</button>`;
     return html;
