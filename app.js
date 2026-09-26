@@ -534,12 +534,13 @@
     if (el) { el.querySelector('.msg').textContent = msg; el.querySelector('.progress > div').style.width = Math.round(slip.progress * 100) + '%'; }
   }
 
-  async function slipRead(file) {
-    const t0 = performance.now();
-    Object.assign(slip, { status: 'working', progress: 0, text: '', parsed: null, qr: null, preview: '', dateCheck: null });
-    rerender();
-    try {
-      slipSetProgress('กำลังเตรียมรูป…', 0.02);
+  /** อ่านสลิปในเครื่อง (QR + OCR) → { preview, text, parsed, qr, dateCheck } — ใช้ร่วมกันทั้งฟอร์มบันทึกจ่ายและหน้าทดลอง */
+  async function ocrSlip(file, onProgress, onPreview) {
+    const progress = (msg, p) => onProgress && onProgress(msg, p);
+    slip.onProgress = progress; // logger ของ worker ตัวเดียวกันส่ง progress มาที่ผู้เรียกปัจจุบัน
+    const out = { preview: '', text: '', parsed: null, qr: null, dateCheck: null };
+    {
+      progress('กำลังเตรียมรูป…', 0.02);
       const img = await createImageBitmap(file);
       // ปรับตาม "ความกว้าง" ให้ตัวอักษรใหญ่พอ (ภาพหน้าจอมือถือยาวมาก ถ้าย่อด้านยาวตัวหนังสือจะเล็กเกิน)
       let scale = 1300 / img.width;
@@ -548,11 +549,11 @@
       cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
       const ctx = cv.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(img, 0, 0, cv.width, cv.height);
-      slip.preview = cv.toDataURL('image/jpeg', 0.7);
-      const pv = $('#slipPreview'); if (pv) { pv.src = slip.preview; pv.hidden = false; }
+      out.preview = cv.toDataURL('image/jpeg', 0.7);
+      if (onPreview) onPreview(out.preview);
 
       // QR ก่อน (เร็ว และแม่นกว่า OCR)
-      slipSetProgress('กำลังหา QR บนสลิป…', 0.05);
+      progress('กำลังหา QR บนสลิป…', 0.05);
       await loadScript(LIBS.jsqr);
       const qrFrom = (c) => { const d = c.getContext('2d').getImageData(0, 0, c.width, c.height); const r = window.jsQR(d.data, d.width, d.height, { inversionAttempts: 'attemptBoth' }); return r ? r.data : null; };
       let qrData = qrFrom(cv);
@@ -560,29 +561,30 @@
         const small = document.createElement('canvas'), k = 800 / Math.max(cv.width, cv.height);
         if (k < 1) { small.width = cv.width * k; small.height = cv.height * k; small.getContext('2d').drawImage(cv, 0, 0, small.width, small.height); qrData = qrFrom(small); }
       }
-      slip.qr = qrData ? window.SlipReader.parseQR(qrData) : null;
+      out.qr = qrData ? window.SlipReader.parseQR(qrData) : null;
 
       // ขาวดำ ช่วยสลิปที่มีพื้นสี
       const id = ctx.getImageData(0, 0, cv.width, cv.height), px = id.data;
       for (let i = 0; i < px.length; i += 4) { const g = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]; px[i] = px[i + 1] = px[i + 2] = g; }
       ctx.putImageData(id, 0, 0);
 
-      slipSetProgress('กำลังโหลดตัวอ่าน OCR (ครั้งแรกประมาณ 5–8 MB)…', 0.1);
+      progress('กำลังโหลดตัวอ่าน OCR (ครั้งแรกประมาณ 5–8 MB)…', 0.1);
       await loadScript(LIBS.tesseract);
       if (!slip.worker) {
         slip.worker = await window.Tesseract.createWorker(['tha', 'eng'], 1, {
           logger: (m) => {
-            if (m.status === 'recognizing text') slipSetProgress('กำลังอ่านตัวอักษร…', 0.3 + m.progress * 0.7);
-            else if (/load|initializ/.test(m.status)) slipSetProgress('กำลังโหลดข้อมูลภาษา…', 0.1 + (m.progress || 0) * 0.2);
+            if (m.status === 'recognizing text') slip.onProgress?.('กำลังอ่านตัวอักษร…', 0.3 + m.progress * 0.65);
+            else if (/load|initializ/.test(m.status)) slip.onProgress?.('กำลังโหลดข้อมูลภาษา…', 0.1 + (m.progress || 0) * 0.2);
           },
         });
       }
       const { data } = await slip.worker.recognize(cv, {}, { text: true, blocks: true });
-      slip.text = data.text || '';
-      slip.parsed = window.SlipReader.parseText(slip.text);
+      out.text = data.text || '';
+      out.parsed = window.SlipReader.parseText(out.text);
 
       // รอบ 2: ครอปบรรทัดที่น่าจะเป็นวันที่ (มีเวลา หรือ ตัวเลข+อักษรไทย) ขยาย 2.5 เท่าแล้วอ่านใหม่
-      slipSetProgress('กำลังอ่านบรรทัดวันที่ซ้ำแบบขยาย…', 0.97);
+      slip.onProgress = null;
+      progress('กำลังอ่านบรรทัดวันที่ซ้ำแบบขยาย…', 0.97);
       const lines = data.lines || (data.blocks || []).flatMap((b) => (b.paragraphs || []).flatMap((p) => p.lines || []));
       const cands = lines.filter((l) => /(?<!\d)([01]?\d|2[0-3])[:.][0-5]\d(?!\d)|\d{1,2}\s*[เก-ฮ]/.test(l.text) && !/[A-Z0-9]{12,}/.test(l.text)).slice(0, 3);
       const zoomReads = [];
@@ -597,10 +599,21 @@
         zoomReads.push({ text: t, date: dt ? dt.iso : '' });
       }
       const zoomDate = zoomReads.find((z) => z.date);
-      slip.dateCheck = { first: slip.parsed.date, firstText: slip.parsed.dateText, zoom: zoomDate ? zoomDate.date : '', zoomText: zoomDate ? zoomDate.text : '', reads: zoomReads };
-      if (zoomDate) { slip.parsed.date = zoomDate.date; slip.parsed.dateText = zoomDate.text; }
-      slip.ms = Math.round(performance.now() - t0);
-      slip.status = 'done';
+      out.dateCheck = { first: out.parsed.date, firstText: out.parsed.dateText, zoom: zoomDate ? zoomDate.date : '', zoomText: zoomDate ? zoomDate.text : '', reads: zoomReads };
+      if (zoomDate) { out.parsed.date = zoomDate.date; out.parsed.dateText = zoomDate.text; }
+      // OCR อ่านวันที่ไม่ได้ แต่ QR มีวันที่ในเลขอ้างอิง → ใช้ของ QR
+      if (!out.parsed.date && out.qr && out.qr.refDate) { out.parsed.date = out.qr.refDate; out.parsed.dateText = 'จากเลขอ้างอิง QR'; }
+    }
+    return out;
+  }
+
+  async function slipRead(file) {
+    const t0 = performance.now();
+    Object.assign(slip, { status: 'working', progress: 0, text: '', parsed: null, qr: null, preview: '', dateCheck: null });
+    rerender();
+    try {
+      const r = await ocrSlip(file, slipSetProgress, (src) => { slip.preview = src; const pv = $('#slipPreview'); if (pv) { pv.src = src; pv.hidden = false; } });
+      Object.assign(slip, r, { ms: Math.round(performance.now() - t0), status: 'done' });
     } catch (e) {
       slip.status = 'error'; slip.msg = e.message || String(e);
     }
@@ -654,7 +667,6 @@
           ${row('ยอดเงิน', p.amount != null ? money(p.amount) + ' บาท' : '', p.amountFrom === 'largest' ? 'ไม่เจอคำว่า "จำนวนเงิน" จึงเลือกตัวเลขที่มากที่สุด ควรตรวจซ้ำ' : '')}
           ${row('ค่าธรรมเนียม', p.fee != null ? money(p.fee) : '')}
           ${row('วันที่', p.date ? thaiDateLong(p.date) : '', slipDateNote(p, q))}
-          ${row('เวลา', p.time)}
           ${row('ธนาคารผู้โอน', p.bank || (q && q.valid && q.bank) || '', p.bank ? 'จากข้อความบนสลิป' : q && q.valid && q.bank ? 'จาก QR (ชื่อธนาคารบนสลิปมักเป็นโลโก้ OCR อ่านไม่ได้)' : '')}
           ${row('เลขอ้างอิง (OCR)', p.ref ? `<span style="word-break:break-all">${esc(p.ref)}</span>` : '', refMatch)}
         </tbody></table></section>
@@ -690,6 +702,8 @@
     if (f.amount === '' && f.type === 'normal') f.amount = planFor(f.contract, f.installment);
     if (!f.payer) f.payer = (S.contracts.find((c) => c.id === f.contract) || {}).owner || S.people[0];
     let amountTouched = !isNew;
+    let splitOn = true;         // ติ๊ก "แยกบันทึกตามคนจ่าย"
+    let slipBusy = false, slipInfo = ''; // สถานะการกรอกจากสลิป (คงไว้ข้ามการ redraw)
 
     const shares = () => { const c = S.contracts.find((c) => c.id === f.contract); return c && f.type === 'normal' ? E.segmentFor(c, Number(f.installment) || 1).shares : {}; };
     const draw = () => {
@@ -697,6 +711,9 @@
       dlg.innerHTML = `<form class="modal-body stack" method="dialog">
         <h2>${isNew ? 'บันทึกการจ่าย' : 'แก้ไขรายการ'}</h2>
         <div class="seg">${[['normal', 'ค่างวดปกติ'], ['extra', 'โปะเงินต้น']].map(([k, v]) => `<button type="button" data-ptype="${k}" class="${f.type === k ? 'on' : ''}">${v}</button>`).join('')}</div>
+        <label class="btn ghost block" style="position:relative;${slipBusy ? 'opacity:.6' : ''}">📷 กรอกยอดและวันที่จากสลิป
+          <input type="file" accept="image/*" data-pslip ${slipBusy ? 'disabled' : ''} style="position:absolute;inset:0;opacity:0;cursor:pointer"></label>
+        <div id="pslipStatus" class="small" ${slipInfo ? '' : 'hidden'}>${slipInfo}</div>
         <div class="grid2">
           <label class="field"><span>วันที่จ่าย</span><input type="date" name="date" value="${f.date}" required></label>
           <label class="field"><span>สัญญา</span><select name="contract">${S.contracts.map((c) => `<option value="${c.id}" ${c.id === f.contract ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
@@ -705,14 +722,52 @@
           <label class="field"><span>ใครจ่าย</span><select name="payer">${S.people.map((x) => `<option ${x === f.payer ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
           <label class="field"><span>คงเหลือตามธนาคาร</span><input type="number" name="bankBalance" step="0.01" inputmode="decimal" placeholder="ถ้ามี" value="${f.bankBalance}"></label>
         </div>
-        ${multi ? `<label class="row small" style="justify-content:flex-start;gap:8px"><input type="checkbox" name="split" checked style="width:auto"> แยกบันทึกตามคนจ่าย (${Object.entries(sh).map(([k, v]) => `${esc(k)} ${money(v)}`).join(' / ')})</label>` : ''}
+        ${multi ? `<label class="row small" style="justify-content:flex-start;gap:8px"><input type="checkbox" name="split" ${splitOn ? 'checked' : ''} style="width:auto"> แยกบันทึกตามคนจ่าย (${Object.entries(sh).map(([k, v]) => `${esc(k)} ${money(v)}`).join(' / ')})</label>` : ''}
         <label class="field"><span>หมายเหตุ</span><input name="note" value="${esc(f.note)}" placeholder="เช่น โอนผ่านแอป, เลขอ้างอิง"></label>
         <div class="row">${isNew ? '' : '<button type="button" class="btn danger" data-pdel>ลบ</button>'}
           <span style="flex:1"></span><button type="button" class="btn ghost" data-pclose>ยกเลิก</button><button class="btn" type="submit">บันทึก</button></div>
       </form>`;
     };
-    const read = () => { const fd = new FormData($('form', dlg)); for (const k of ['date', 'contract', 'installment', 'amount', 'payer', 'bankBalance', 'note']) f[k] = fd.get(k) ?? f[k]; return fd; };
+    const read = () => {
+      const fd = new FormData($('form', dlg));
+      for (const k of ['date', 'contract', 'installment', 'amount', 'payer', 'bankBalance', 'note']) f[k] = fd.get(k) ?? f[k];
+      if ($('[name="split"]', dlg)) splitOn = !!fd.get('split');
+      return fd;
+    };
     draw();
+
+    /** เลือกรูปสลิป → อ่านในเครื่อง → กรอกยอด + วันที่ (ประเภทปกติ/โปะ ผู้ใช้เลือกเอง, ไม่บันทึกอัตโนมัติ) */
+    async function fillFromSlip(file) {
+      read();
+      slipBusy = true; slipInfo = 'กำลังอ่านสลิป…'; draw();
+      const status = (msg, p) => { const el = $('#pslipStatus', dlg); if (el) { el.hidden = false; el.textContent = `${msg}${p != null ? ' ' + Math.round(p * 100) + '%' : ''}`; } };
+      let r;
+      try { r = await ocrSlip(file, status); }
+      catch (e) { slipBusy = false; slipInfo = `<span class="pill bad">อ่านสลิปไม่สำเร็จ</span> ${esc(e.message || e)}`; if (dlg.open) draw(); return; }
+      slipBusy = false;
+      if (!dlg.open) return;
+      read(); // เก็บค่าที่ผู้ใช้อาจแก้ระหว่างรอ
+      const p = r.parsed, got = [], warn = [];
+      if (p.amount > 0) { f.amount = p.amount; amountTouched = true; got.push(`ยอด ${money(p.amount)}`); } else warn.push('อ่านยอดเงินไม่ได้');
+      if (p.date) { f.date = p.date; got.push(`วันที่ ${thaiDate(p.date)}`); } else warn.push('อ่านวันที่ไม่ได้');
+      if (p.amountFrom === 'largest') warn.push('ไม่เจอคำว่า "จำนวนเงิน" — ตรวจยอดอีกครั้ง');
+      if (p.date && p.date > todayStr()) warn.push('วันที่เป็นอนาคต น่าจะอ่านผิด');
+      if (p.date && r.qr && r.qr.refDate && r.qr.refDate !== p.date) warn.push(`เลขอ้างอิง QR ระบุวันที่ ${thaiDate(r.qr.refDate)}`);
+      // ยอดตรงกับส่วนของคนเดียวในงวดที่แบ่งจ่าย → ตั้งคนจ่ายให้ และไม่แยกบันทึก
+      const sh = shares();
+      if (p.amount > 0 && Object.keys(sh).length > 1) {
+        const who = Object.entries(sh).find(([, v]) => Math.abs(Number(v) - p.amount) < 1);
+        if (who) { f.payer = who[0]; splitOn = false; got.push(`เป็นส่วนของ${who[0]}`); }
+      }
+      if (p.amount > 0 && f.type === 'normal') {
+        const plan = planFor(f.contract, Number(f.installment));
+        if (!Object.values(sh).some((v) => Math.abs(Number(v) - p.amount) < 1) && Math.abs(plan - p.amount) >= 1) warn.push(`ไม่ตรงค่างวดของสัญญา/งวดที่เลือก (${money(plan)}) — ${slipGuess(p.amount)}`);
+      }
+      slipInfo = (got.length ? `<span class="pill ok">อ่านจากสลิป</span> ${esc(got.join(' · '))}` : '')
+        + warn.map((w) => `<div style="color:var(--warn)">⚠️ ${esc(w)}</div>`).join('')
+        + '<div class="muted">ตรวจตัวเลขและเลือกประเภทให้ถูก แล้วกดบันทึก</div>';
+      draw();
+    }
     dlg.onclick = (e) => {
       if (e.target === dlg) dlg.close();
       const t = e.target.closest('[data-ptype],[data-pclose],[data-pdel]');
@@ -728,6 +783,9 @@
         if (confirm('ลบรายการนี้?')) { dlg.close(); deletePayments([f.id]); }
       }
     };
+    dlg.onchange = (e) => {
+      if (e.target.matches('[data-pslip]') && e.target.files && e.target.files[0] && !slipBusy) fillFromSlip(e.target.files[0]);
+    };
     dlg.oninput = (e) => {
       if (e.target.name === 'amount') amountTouched = true;
       if (e.target.name === 'contract' || e.target.name === 'installment') {
@@ -739,6 +797,7 @@
     };
     dlg.onsubmit = (e) => {
       e.preventDefault();
+      if (slipBusy) { toast('รออ่านสลิปให้เสร็จก่อน', true); return; }
       const fd = read();
       const base = { id: f.id || undefined, date: f.date, contract: f.contract, type: f.type, installment: f.installment === '' ? '' : Number(f.installment), payer: f.payer, bankBalance: f.bankBalance === '' ? '' : Number(f.bankBalance), note: f.note.trim() };
       let list;
