@@ -495,13 +495,14 @@
       <label class="field"><span>วันหยุดเพิ่มเติมที่ธนาคารเลื่อน (บรรทัดละวัน YYYY-MM-DD)</span><textarea data-path="holidays" data-kind="lines">${esc((d.holidays || []).join('\n'))}</textarea></label>
     </section>`;
 
-    html += `<section class="card stack"><h2>แจ้งเตือนทางอีเมล</h2>
+    html += `<section class="card stack"><h2>แจ้งเตือน (อีเมล / LINE)</h2>
       <label class="field"><span>อีเมล (คั่นด้วย , )</span><input type="text" inputmode="email" data-path="emails" data-kind="csv" value="${esc((d.emails || []).join(', '))}"></label>
       <div class="grid2">
         <label class="field"><span>เตือนล่วงหน้า (วัน)</span><input type="number" min="0" max="10" data-path="remindDaysBefore" value="${d.remindDaysBefore}"></label>
         <label class="field"><span>ลิงก์แอป (ใส่ในอีเมล)</span><input type="url" data-path="appUrl" value="${esc(d.appUrl)}" placeholder="${esc(location.href.split('#')[0])}"></label>
       </div>
-      ${remote() ? '<button class="btn ghost sm" data-action="test-email">ส่งอีเมลทดสอบ</button>' : '<p class="small muted" style="margin:0">ต้องเชื่อม Google Sheets ก่อน อีเมลจึงจะทำงาน</p>'}
+      <p class="small muted" style="margin:0">LINE: ใส่ Channel access token ของ LINE OA ใน Script Properties ชื่อ <code>LINE_TOKEN</code> แล้วระบบจะส่งหาทุกคนที่แอด OA เป็นเพื่อน</p>
+      ${remote() ? '<div class="row wrap" style="justify-content:flex-start"><button class="btn ghost sm" data-action="test-email">ส่งอีเมลทดสอบ</button><button class="btn ghost sm" data-action="test-line">ส่ง LINE ทดสอบ</button></div>' : '<p class="small muted" style="margin:0">ต้องเชื่อม Google Sheets ก่อน การแจ้งเตือนจึงจะทำงาน</p>'}
     </section>`;
 
     const dirty = JSON.stringify(d) !== JSON.stringify(S);
@@ -905,6 +906,9 @@
         break;
       case 'test-email':
         await withBusy(async () => { if (!state.settings.emails.length) throw new Error('ยังไม่ได้ใส่อีเมลแล้วกดบันทึก'); await apiPost({ action: 'testEmail' }); }, 'ส่งอีเมลทดสอบแล้ว');
+        break;
+      case 'test-line':
+        await withBusy(() => apiPost({ action: 'testLine' }), 'ส่ง LINE ทดสอบแล้ว');
         break;
       case 'export': {
         const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), settings: state.settings, payments: state.payments }, null, 2)], { type: 'application/json' });

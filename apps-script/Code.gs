@@ -27,7 +27,8 @@ function doPost(e) {
         case 'savePayment': return { payment: savePayment_(body.payment) };
         case 'deletePayment': deletePayment_(body.id); return { deleted: body.id };
         case 'saveSettings': writeSettings_(body.settings); return { settings: readSettings_() };
-        case 'testEmail': dailyReminder(true); return { sent: true };
+        case 'testEmail': runReminder_(true, { email: true }); return { sent: true };
+        case 'testLine': runReminder_(true, { line: true }); return { sent: true };
         default: throw new Error('unknown action: ' + body.action);
       }
     } finally {
@@ -126,10 +127,31 @@ function installTrigger() {
   ScriptApp.newTrigger('dailyReminder').timeBased().everyDays(1).atHour(8).inTimezone(TZ).create();
 }
 
-/** ตรวจงวดที่ครบกำหนดใน N วัน ถ้ายังไม่บันทึกจ่าย → ส่งอีเมล (force = ส่งทดสอบ) */
-function dailyReminder(force) {
+/** ถูกเรียกโดย trigger รายวัน (trigger ส่ง event object มา — ห้ามตีความเป็นโหมดทดสอบ) */
+function dailyReminder() {
+  runReminder_(false, { email: true, line: true });
+}
+
+/** รันจาก editor ได้: ส่ง LINE ทดสอบ (ใช้ขอสิทธิ์เชื่อมต่อภายนอกครั้งแรกด้วย) */
+function testLine() {
+  runReminder_(true, { line: true });
+}
+
+/**
+ * ตรวจงวดที่ครบกำหนดใน N วัน ถ้ายังไม่บันทึกจ่าย → ส่งอีเมล / LINE
+ * force = ส่งทดสอบ (ส่งเสมอ แม้ยังไม่ถึงวันเตือน), channels = { email, line }
+ */
+function runReminder_(force, channels) {
+  force = force === true;
   const s = readSettings_();
-  if (!s || !s.emails || !s.emails.length) return;
+  if (!s) return;
+  const lineToken = PropertiesService.getScriptProperties().getProperty('LINE_TOKEN');
+  const useEmail = channels.email && s.emails && s.emails.length;
+  const useLine = channels.line && !!lineToken;
+  if (!useEmail && !useLine) {
+    if (force) throw new Error(channels.line ? 'ยังไม่ได้ตั้ง LINE_TOKEN ใน Script Properties' : 'ยังไม่ได้ใส่อีเมลในหน้าตั้งค่า');
+    return;
+  }
   const payments = readPayments_();
   const today = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
   const before = Number(s.remindDaysBefore == null ? 1 : s.remindDaysBefore);
@@ -155,17 +177,39 @@ function dailyReminder(force) {
   });
 
   if (!items.length) {
-    if (force) MailApp.sendEmail(s.emails.join(','), '[ผ่อนบ้าน] ทดสอบอีเมล', 'ระบบแจ้งเตือนทำงานปกติ — ตอนนี้ไม่มีงวดค้างบันทึก');
+    if (!force) return;
+    if (useEmail) MailApp.sendEmail(s.emails.join(','), '[ผ่อนบ้าน] ทดสอบอีเมล', 'ระบบแจ้งเตือนทำงานปกติ — ตอนนี้ไม่มีงวดค้างบันทึก');
+    if (useLine) sendLine_(lineToken, '🏠 ทดสอบแจ้งเตือนผ่อนบ้าน\nระบบทำงานปกติ — ตอนนี้ไม่มีงวดค้างบันทึก');
     return;
   }
 
-  const lines = items.map((it) => {
-    const who = Object.keys(it.shares).map((k) => `${k} ${money_(it.shares[k])}`).join(', ');
-    return `• ${it.c.name} งวดที่ ${it.n} ครบกำหนด ${thaiDate_(it.due)} ยอด ${money_(it.planned)} บาท (${who})` +
-      (it.paid > 0 ? ` — บันทึกแล้ว ${money_(it.paid)}` : ' — ยังไม่ได้บันทึก');
+  const who_ = (it) => Object.keys(it.shares).map((k) => `${k} ${money_(it.shares[k])}`).join(', ');
+  const status_ = (it) => (it.paid > 0 ? `บันทึกแล้ว ${money_(it.paid)}` : 'ยังไม่ได้บันทึก');
+  const due = thaiDate_(items[0].due);
+
+  if (useEmail) {
+    const lines = items.map((it) => `• ${it.c.name} งวดที่ ${it.n} ครบกำหนด ${thaiDate_(it.due)} ยอด ${money_(it.planned)} บาท (${who_(it)}) — ${status_(it)}`);
+    const body = `ใกล้ถึงวันจ่ายค่างวดบ้าน\n\n${lines.join('\n')}\n\nจ่ายแล้วอย่าลืมบันทึกในแอป${s.appUrl ? '\n' + s.appUrl : ''}`;
+    MailApp.sendEmail(s.emails.join(','), `[ผ่อนบ้าน] ${force ? 'ทดสอบ: ' : ''}เตือนจ่ายงวด ${due}`, body);
+  }
+  if (useLine) {
+    const head = force ? `🧪 ทดสอบ — งวดถัดไป ${due}` : `🏠 ครบกำหนดจ่าย ${due}`;
+    const lines = items.map((it) => `• ${it.c.name} งวด ${it.n}: ${money_(it.planned)}\n   (${who_(it)}) ${status_(it)}`);
+    sendLine_(lineToken, `${head}\n${lines.join('\n')}${s.appUrl ? '\n\nจ่ายแล้วบันทึกที่ ' + s.appUrl : ''}`);
+  }
+}
+
+/** ส่งข้อความหาทุกคนที่แอด LINE OA เป็นเพื่อน (broadcast — ไม่ต้องใช้ User ID) */
+function sendLine_(token, text) {
+  const res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/broadcast', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + token },
+    payload: JSON.stringify({ messages: [{ type: 'text', text: text.slice(0, 4900) }] }),
+    muteHttpExceptions: true,
   });
-  const body = `ใกล้ถึงวันจ่ายค่างวดบ้าน\n\n${lines.join('\n')}\n\nจ่ายแล้วอย่าลืมบันทึกในแอป${s.appUrl ? '\n' + s.appUrl : ''}`;
-  MailApp.sendEmail(s.emails.join(','), `[ผ่อนบ้าน] เตือนจ่ายงวด ${thaiDate_(items[0].due)}`, body);
+  const code = res.getResponseCode();
+  if (code !== 200) throw new Error('LINE ส่งไม่สำเร็จ (' + code + '): ' + res.getContentText().slice(0, 200));
 }
 
 // ---------- วันที่ (ต้องตรงกับ engine.js) ----------
